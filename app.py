@@ -13,11 +13,11 @@ st.set_page_config(
 )
 
 st.title("📊 OOH 投放结案 Summary 自动化生成工具")
-st.write("请依次上传 **1《统计DB》**、**2《Spotplan》**、**3《补偿汇总》** 以及 **4《OOH投放结案Summary格式》**。系统将以格式表为蓝本，自动填入数据并**完美保留原始的单元格样式、颜色格式和 Excel 动态计算公式**[cite: 5]。")
+st.write("请依次上传 **1《统计DB》**、**2《Spotplan》**、**3《补偿汇总》（可选）** 以及 **4《OOH投放结案Summary格式》**。系统将以格式表为蓝本，自动填入数据并完美保留原始样式、颜色格式和 Excel 动态计算公式[cite: 5]。")
 
 st.divider()
 
-# 文件上传区域 (4列布局)
+# 文件上传区域 (4列布局，将补偿汇总改为可选)
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
@@ -27,7 +27,7 @@ with col2:
     spot_file = st.file_uploader("2、上传《Spotplan》", type=["xlsx"], key="spot")
 
 with col3:
-    comp_file = st.file_uploader("3、上传《补偿汇总》", type=["xlsx", "xls"], key="comp")
+    comp_file = st.file_uploader("3、上传《补偿汇总》(可选)", type=["xlsx", "xls"], key="comp")
 
 with col4:
     template_file = st.file_uploader("4、上传《OOH投放结案Summary格式》", type=["xlsx"], key="template")
@@ -66,14 +66,13 @@ def generate_summary_from_template(spot_file, db_file, comp_file, template_file)
                 db_lookup[c2] = coverage_val
 
     # -------------------------------------------------------------
-    # 2. 读取 赔付统计表 构建 Compensation 检索字典[cite: 5]
+    # 2. 读取 赔付统计表 构建 Compensation 检索字典（支持可选跳过）[cite: 5]
     # -------------------------------------------------------------
     comp_lookup = {}
     if comp_file is not None:
         wb_comp = openpyxl.load_workbook(comp_file, data_only=True)
         ws_comp = wb_comp.active
         
-        # 寻找表头所在行
         comp_header_row = 1
         for r in range(1, 10):
             row_vals = [str(ws_comp.cell(r, c).value or '') for c in range(1, 15)]
@@ -81,7 +80,6 @@ def generate_summary_from_template(spot_file, db_file, comp_file, template_file)
                 comp_header_row = r
                 break
 
-        # 建立列名映射
         header_map = {}
         for c in range(1, ws_comp.max_column + 1):
             val = str(ws_comp.cell(comp_header_row, c).value or '').strip()
@@ -94,33 +92,33 @@ def generate_summary_from_template(spot_file, db_file, comp_file, template_file)
         col_plan = header_map.get('补偿方案')
         col_amount = header_map.get('实际补偿(元)') or header_map.get('应补偿价值(元)') or header_map.get('受影响价值(元)')
 
-        for r in range(comp_header_row + 1, ws_comp.max_row + 1):
-            media_val = ws_comp.cell(r, col_media).value if col_media else None
-            if not media_val:
-                continue
+        if col_media:
+            for r in range(comp_header_row + 1, ws_comp.max_row + 1):
+                media_val = ws_comp.cell(r, col_media).value
+                if not media_val:
+                    continue
+                    
+                city_val = str(ws_comp.cell(r, col_city).value or '').strip() if col_city else ""
+                media_str = str(media_val).strip()
+                anomaly_val = ws_comp.cell(r, col_anomaly).value if col_anomaly else ""
+                plan_val = ws_comp.cell(r, col_plan).value if col_plan else ""
+                amount_val = ws_comp.cell(r, col_amount).value if col_amount else 0
+
+                comp_info = {
+                    'anomaly': str(anomaly_val or '').strip(),
+                    'plan': str(plan_val or '').strip(),
+                    'amount': amount_val if amount_val is not None else 0
+                }
+
+                comp_lookup[media_str] = comp_info
+                if city_val and not media_str.startswith(city_val):
+                    comp_lookup[f"{city_val}{media_str}"] = comp_info
                 
-            city_val = str(ws_comp.cell(r, col_city).value or '').strip() if col_city else ""
-            media_str = str(media_val).strip()
-            anomaly_val = ws_comp.cell(r, col_anomaly).value if col_anomaly else ""
-            plan_val = ws_comp.cell(r, col_plan).value if col_plan else ""
-            amount_val = ws_comp.cell(r, col_amount).value if col_amount else 0
-
-            comp_info = {
-                'anomaly': str(anomaly_val or '').strip(),
-                'plan': str(plan_val or '').strip(),
-                'amount': amount_val if amount_val is not None else 0
-            }
-
-            # 精确与清洗键名全覆盖注册
-            comp_lookup[media_str] = comp_info
-            if city_val and not media_str.startswith(city_val):
-                comp_lookup[f"{city_val}{media_str}"] = comp_info
-            
-            c1, c2, _ = clean_location_name(media_str)
-            if c1:
-                comp_lookup[c1] = comp_info
-            if c2:
-                comp_lookup[c2] = comp_info
+                c1, c2, _ = clean_location_name(media_str)
+                if c1:
+                    comp_lookup[c1] = comp_info
+                if c2:
+                    comp_lookup[c2] = comp_info
 
     # -------------------------------------------------------------
     # 3. 读取 Spotplan 明细数据[cite: 5]
@@ -165,14 +163,12 @@ def generate_summary_from_template(spot_file, db_file, comp_file, template_file)
         c1, c2, orig = clean_location_name(loc)
         is_bonus = ("赠送" in orig) or ("额外赠送" in orig) or ("增值" in orig)
         
-        # 如果是不带赠送的主媒体，记录其在输出表中的 Excel 行号和折扣
         if not is_bonus and c1:
             discount_val = row[10] # Col L: Discount
             main_media_info[c1] = {'row': current_row, 'discount': discount_val}
             if c2:
                 main_media_info[c2] = {'row': current_row, 'discount': discount_val}
 
-    # 提取模板中第 4 行的单元格样式作为通用范本
     sample_cells = [ws_tpl.cell(start_row, col) for col in range(1, 32)]
 
     # -------------------------------------------------------------
@@ -198,18 +194,15 @@ def generate_summary_from_template(spot_file, db_file, comp_file, template_file)
         prod_fee = row[14]    
         gross_cost = row[15]  
 
-        # 判定是否为“赠送”点位
         c1, c2, orig = clean_location_name(loc)
         is_bonus = ("赠送" in orig) or ("额外赠送" in orig) or ("增值" in orig)
 
-        # 匹配赔付统计表数据
         matched_comp = comp_lookup.get(orig) or comp_lookup.get(c1) or comp_lookup.get(c2) or comp_lookup.get(f"{mkt}{c1}")
         
         comp_anomaly = matched_comp['anomaly'] if matched_comp else ""
         comp_plan = matched_comp['plan'] if matched_comp else ""
         comp_amount = matched_comp['amount'] if matched_comp else 0
 
-        # 为“赠送”点位寻找主媒体的折扣与关联公式（用于 Y 列）
         y_net_value_formula = 0
         if is_bonus:
             matched_main = main_media_info.get(c1) or main_media_info.get(c2)
@@ -221,7 +214,6 @@ def generate_summary_from_template(spot_file, db_file, comp_file, template_file)
 
         resource_qty = f"{no_unit}{buying_unit}" if (no_unit and buying_unit) else no_unit
 
-        # AC列 日均覆盖人次检索
         daily_coverage = db_lookup.get(orig) or db_lookup.get(c1) or db_lookup.get(c2)
         if daily_coverage == "/" or daily_coverage is None:
             for k, v in db_lookup.items():
@@ -229,42 +221,40 @@ def generate_summary_from_template(spot_file, db_file, comp_file, template_file)
                     daily_coverage = v
                     break
 
-        # 构造并严格保持 Summary 模板中的公式结构
         row_values = {
-            1: mkt,                                                        # A: 市场
-            2: loc,                                                        # B: 媒体
-            3: resource_qty,                                               # C: 资源数量
-            4: duration_freq,                                              # D: 广告频次
-            5: period,                                                     # E: 计划投放周期
-            6: f"=(_xlfn.TEXTAFTER(E{current_row},\"-\")-_xlfn.TEXTBEFORE(E{current_row},\"-\")+1)/7", # F: No. Of Week 公式
-            7: no_unit,                                                    # G: No. Of Unit
-            8: buying_unit,                                                # H: Buying Uint
-            9: duration_freq,                                              # I: Duration/Frequency
-            10: ratecard_cost,                                             # J: Ratecard Cost
-            11: f"=J{current_row}*G{current_row}*F{current_row}",          # K: Ratecard TTL Cost 公式
-            12: discount if not is_bonus else 0,                           # L: Discount
-            13: f"=J{current_row}*L{current_row}",                          # M: Net Unit Cost 公式
-            14: f"=ROUND(M{current_row}*F{current_row}*G{current_row},0)", # N: Net TTL Cost 公式
-            15: unit_prod_fee if not is_bonus else 0,                      # O: Unit Production Fee
-            16: f"=O{current_row}*G{current_row}",                          # P: Production Fee 公式
-            17: f"=N{current_row}+P{current_row}",                          # Q: Gross Cost 公式
-            18: comp_anomaly,                                              # R: 第三方监测/媒体自查情况
-            19: comp_plan,                                                 # S: 补偿方案
-            20: 0 if not is_bonus else "",                                 # T: 额外赠送
-            21: f"=_xlfn.TEXTBEFORE(E{current_row},\"-\")&\"-\"&_xlfn.TEXTAFTER(E{current_row+1},\"-\")" if not is_bonus else "", # U: 实际投放周期
-            22: f"=N{current_row}" if not is_bonus else 0,                  # V: 投放实际总净价 公式
-            23: f"=P{current_row}" if not is_bonus else 0,                  # W: 投放实际总制作费 公式
-            24: 0 if not is_bonus else f"=K{current_row}",                  # X: 投放赠送价值（刊例）
-            25: 0 if not is_bonus else y_net_value_formula,                # Y: 投放赠送价值（净价）
-            26: comp_amount,                                               # Z: 补偿价值（净价）
-            27: 0,                                                         # AA: 非补偿增值赠送（刊例）
-            28: 0,                                                         # AB: 非补偿增值赠送（净价）
-            29: daily_coverage if (daily_coverage is not None and not is_bonus) else "", # AC: 日均覆盖人次
-            30: f"=_xlfn.TEXTAFTER(U{current_row},\"-\")-_xlfn.TEXTBEFORE(U{current_row},\"-\")+1" if not is_bonus else "", # AD: 投放天数 公式
-            31: f"=AC{current_row}*AD{current_row}" if not is_bonus else "" # AE: 总覆盖人次 公式
+            1: mkt,                                                        
+            2: loc,                                                        
+            3: resource_qty,                                               
+            4: duration_freq,                                              
+            5: period,                                                     
+            6: f"=(_xlfn.TEXTAFTER(E{current_row},\"-\")-_xlfn.TEXTBEFORE(E{current_row},\"-\")+1)/7", 
+            7: no_unit,                                                    
+            8: buying_unit,                                                
+            9: duration_freq,                                              
+            10: ratecard_cost,                                             
+            11: f"=J{current_row}*G{current_row}*F{current_row}",          
+            12: discount if not is_bonus else 0,                           
+            13: f"=J{current_row}*L{current_row}",                          
+            14: f"=ROUND(M{current_row}*F{current_row}*G{current_row},0)", 
+            15: unit_prod_fee if not is_bonus else 0,                      
+            16: f"=O{current_row}*G{current_row}",                          
+            17: f"=N{current_row}+P{current_row}",                          
+            18: comp_anomaly,                                              
+            19: comp_plan,                                                 
+            20: 0 if not is_bonus else "",                                 
+            21: f"=_xlfn.TEXTBEFORE(E{current_row},\"-\")&\"-\"&_xlfn.TEXTAFTER(E{current_row+1},\"-\")" if not is_bonus else "", 
+            22: f"=N{current_row}" if not is_bonus else 0,                  
+            23: f"=P{current_row}" if not is_bonus else 0,                  
+            24: 0 if not is_bonus else f"=K{current_row}",                  
+            25: 0 if not is_bonus else y_net_value_formula,                
+            26: comp_amount,                                               
+            27: 0,                                                         
+            28: 0,                                                         
+            29: daily_coverage if (daily_coverage is not None and not is_bonus) else "", 
+            30: f"=_xlfn.TEXTAFTER(U{current_row},\"-\")-_xlfn.TEXTBEFORE(U{current_row},\"-\")+1" if not is_bonus else "", 
+            31: f"=AC{current_row}*AD{current_row}" if not is_bonus else "" 
         }
 
-        # 写入单元格并完全继承模板第 4 行的原本样式格式
         for col_idx, val in row_values.items():
             cell = ws_tpl.cell(row=current_row, column=col_idx)
             cell.value = val
@@ -278,14 +268,13 @@ def generate_summary_from_template(spot_file, db_file, comp_file, template_file)
                     cell.alignment = sample_cell.alignment.copy()
                     cell.number_format = sample_cell.number_format
 
-    # 导出包含完整格式与公式的 Excel 文件流
     output = io.BytesIO()
     wb_tpl.save(output)
     output.seek(0)
     return output
 
-# 触发按钮逻辑
-if spot_file and db_file and comp_file and template_file:
+# 触发按钮逻辑（仅需核心的 统计DB、Spotplan、模板 即可运行，补偿汇总可选）
+if spot_file and db_file and template_file:
     if st.button("🚀 套用模板生成结案 Summary", type="primary"):
         try:
             with st.spinner("正在匹配数据、保留模板格式并写入 Excel 公式..."):
@@ -300,4 +289,4 @@ if spot_file and db_file and comp_file and template_file:
         except Exception as e:
             st.error(f"生成失败，错误原因: {str(e)}")
 else:
-    st.info("💡 请在上方的 4 个上传框中全部上传完毕对应文件以启用生成按钮。")
+    st.info("💡 请在上方的《统计DB》、《Spotplan》和《OOH投放结案Summary格式》中上传核心文件以启用生成按钮（《补偿汇总》可根据项目实际情况选择性上传）。")
